@@ -1,10 +1,11 @@
 package com.abhinavmehta.confx.sdk.evaluator;
 
 import com.abhinavmehta.confx.sdk.dto.ConfigDataType;
+import com.abhinavmehta.confx.sdk.dto.ConfigDependencyDto;
 import com.abhinavmehta.confx.sdk.dto.ConfigVersionDto;
 import com.abhinavmehta.confx.sdk.dto.EvaluationContext;
-import com.abhinavmehta.confx.sdk.dto.RuleDto;
 import com.abhinavmehta.confx.sdk.store.ConfigCache;
+import com.abhinavmehta.confx.sdk.store.ConfigDependencyStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +20,7 @@ import java.util.Set;
 public class ConfXConfigEvaluator {
     private static final Logger log = LoggerFactory.getLogger(ConfXConfigEvaluator.class);
     private final ConfigCache configCache;
+    private final ConfigDependencyStore dependencyStore;
     private final ConfXRuleEvaluator ruleEvaluator;
     private final ObjectMapper objectMapper; // For JSON parsing and comparison
     // SDK needs to know about its own project ID and environment ID to fetch dependencies correctly, 
@@ -27,8 +29,10 @@ public class ConfXConfigEvaluator {
     private final Long sdkEnvironmentId;
 
 
-    public ConfXConfigEvaluator(ConfigCache configCache, Long projectId, Long environmentId, ObjectMapper objectMapper) {
+    public ConfXConfigEvaluator(ConfigCache configCache, ConfigDependencyStore dependencyStore, 
+                                Long projectId, Long environmentId, ObjectMapper objectMapper) {
         this.configCache = configCache;
+        this.dependencyStore = dependencyStore;
         this.ruleEvaluator = new ConfXRuleEvaluator();
         this.sdkProjectId = projectId;
         this.sdkEnvironmentId = environmentId;
@@ -54,14 +58,36 @@ public class ConfXConfigEvaluator {
         }
         evaluationStack.add(configKey);
 
-        // Check prerequisites (Dependencies are stored on ConfigItem level, not version specific in current model)
-        // For SDK, we assume dependencies are defined on ConfigItem and fetched/available somehow if needed.
-        // The current server-side ConfigDependency is linked to ConfigItem. The SDK cache has ConfigVersionDto.
-        // This part needs careful thought: How does SDK know about dependencies of a configKey?
-        // For now, let's assume dependencies are NOT YET handled in this client-side evaluator fully without server support
-        // to provide dependency info with ConfigVersionDto or via a separate SDK mechanism.
-        // As a simplification, we'll skip dependency evaluation in the SDK for now, focusing on rules.
-        // TODO: Integrate full dependency evaluation if SDK is to be fully standalone for this.
+        // --- SDK DEPENDENCY CHECK ---        
+        List<ConfigDependencyDto> dependencies = dependencyStore.getPrerequisitesFor(configKey);
+        if (dependencies != null && !dependencies.isEmpty()) {
+            for (ConfigDependencyDto dependency : dependencies) {
+                if (dependency.getPrerequisiteConfigKey() == null) continue; // Should not happen with valid data
+
+                EvaluatedConfigResult prerequisiteResult = this.evaluateInternal(
+                    dependency.getPrerequisiteConfigKey(),
+                    evalContext, 
+                    new HashSet<>(evaluationStack) // Pass copy of stack for parallel branches of dependency graph
+                );
+
+                boolean prerequisiteMet = compareEvaluatedValue(
+                    prerequisiteResult.value,
+                    dependency.getPrerequisiteExpectedValue(),
+                    dependency.getPrerequisiteDataType()
+                );
+
+                if (!prerequisiteMet) {
+                    log.info("SDK: Prerequisite not met for config '{}': Prerequisite '{}' (expected '{}', got '{}').",
+                             configKey, dependency.getPrerequisiteConfigKey(), 
+                             dependency.getPrerequisiteExpectedValue(), prerequisiteResult.value);
+                    
+                    Object offValue = getOffValue(configVersion.getConfigItemDataType());
+                    evaluationStack.remove(configKey);
+                    return new EvaluatedConfigResult(offValue, configVersion.getConfigItemDataType(), null, "PREREQUISITE_NOT_MET", configVersion.getId(), configVersion.getVersionNumber());
+                }
+            }
+        }
+        // --- END SDK DEPENDENCY CHECK ---
 
         // Rule Evaluation
         ConfXRuleEvaluator.MatchedRuleResult ruleResult = ruleEvaluator.evaluateRules(configVersion.getRules(), evalContext);
@@ -82,6 +108,38 @@ public class ConfXConfigEvaluator {
         evaluationStack.remove(configKey);
         
         return new EvaluatedConfigResult(typedValue, configVersion.getConfigItemDataType(), matchedRuleId, evaluationSource, configVersion.getId(), configVersion.getVersionNumber());
+    }
+
+    private boolean compareEvaluatedValue(Object actualEvaluatedValue, String expectedValueString, ConfigDataType prerequisiteDataType) {
+        if (expectedValueString == null) { 
+             return actualEvaluatedValue == null;
+        }
+        if (actualEvaluatedValue == null) { 
+            return false;
+        }
+        try {
+            switch (prerequisiteDataType) {
+                case BOOLEAN:
+                    return ((Boolean) actualEvaluatedValue).equals(Boolean.parseBoolean(expectedValueString));
+                case INTEGER:
+                    return ((Number) actualEvaluatedValue).intValue() == Integer.parseInt(expectedValueString);
+                case DOUBLE:
+                    return ((Number) actualEvaluatedValue).doubleValue() == Double.parseDouble(expectedValueString);
+                case STRING:
+                    return actualEvaluatedValue.toString().equals(expectedValueString);
+                case JSON:
+                    JsonNode actualJson = (actualEvaluatedValue instanceof JsonNode) ? (JsonNode) actualEvaluatedValue : objectMapper.valueToTree(actualEvaluatedValue);
+                    JsonNode expectedJson = objectMapper.readTree(expectedValueString);
+                    return actualJson.equals(expectedJson);
+                default:
+                    log.warn("SDK: Unsupported data type for prerequisite comparison: {}", prerequisiteDataType);
+                    return false;
+            }
+        } catch (Exception e) {
+            log.error("SDK: Error comparing prerequisite value: actual='{}' (type: {}), expectedString='{}', prerequisiteType='{}': {}",
+                      actualEvaluatedValue, actualEvaluatedValue.getClass().getName(), expectedValueString, prerequisiteDataType, e.getMessage());
+            return false;
+        }
     }
 
     private Object getOffValue(ConfigDataType dataType) {
