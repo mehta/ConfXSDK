@@ -1,0 +1,50 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.abhinavmehta.confx'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // HTTP Client (Java 11+ built-in)
+    // SSE Client - will use Java's HttpClient for this as well
+
+    // JSON Processing
+    api 'com.fasterxml.jackson.core:jackson-databind:2.15.3' // Use a recent version
+    api 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.15.3' // For Java Time types if needed directly
+
+    // Spring Expression Language (SpEL) for rule evaluation
+    api 'org.springframework:spring-expression:6.0.13' // Align with Spring Boot 3 if possible, or use standalone
+
+    // Lombok for boilerplate reduction
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    // Logging Facade
+    api 'org.slf4j:slf4j-api:2.0.9'
+
+    // For testing
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.0'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.0'
+    testImplementation 'org.mockito:mockito-core:5.5.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.5.0'
+    // Example: WireMock for testing HTTP interactions
+    testImplementation 'com.github.tomakehurst:wiremock-jre8:2.35.0'
+
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Task to create a fat JAR (uber JAR) if needed for distribution, though typically used as a library dependency.
+// tasks.withType(Jar) { ... } 
